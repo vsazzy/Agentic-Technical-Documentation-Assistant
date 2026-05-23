@@ -103,25 +103,38 @@ What functions are used for SPI communication?
 - Embeddings are generated locally.
 - Vector database is stored locally in `db/`.
 - Private SDK files inside `docs/private/` are ignored by Git.
-
 ## Project Structure
 
 ```text
-local-sdk-rag-assistant/
-├── app.py
-├── ingest.py
-├── rag.py
-├── config.py
-├── pyproject.toml
-├── uv.lock
-├── README.md
-├── .gitignore
+local-sdk-agent/
+├── app.py                     # Main Streamlit chat UI
+├── ingest.py                  # Document ingestion pipeline
+├── rag.py                     # Core RAG logic: vector DB, context formatting, LLM answer generation
+├── agent.py                   # Agentic workflow: planner, routing, validation, structured response
+├── tools.py                   # Agent tools: retrieval, citation validation, refusal, metrics
+├── observability.py           # Logging utilities for latency, retrieval scores, tokens, failures
+├── dashboard.py               # Streamlit observability dashboard
+├── config.py                  # Central configuration for models, paths, chunking, thresholds
+├── pyproject.toml             # uv project dependencies
+├── uv.lock                    # Locked dependency versions
+├── README.md                  # Project documentation
+├── .gitignore                 # Prevents private docs, vector DB, env files from being committed
+├── .python-version            # Python version used by uv
+│
 ├── docs/
-│   ├── public/
+│   ├── public/                # Public demo SDK documentation
 │   │   └── raspberry-pi-pico-c-sdk.pdf
-│   └── private/
-├── db/
-└── screenshots/
+│   └── private/               # Private SDK docs, ignored by Git
+│       └── .gitkeep
+│
+├── db/                        # Local Chroma vector database, ignored by Git
+│
+├── logs/
+│   └── rag_logs.jsonl         # Observability logs, ignored or optionally committed for demo
+│
+├── eval/
+├── screenshots/
+└── assets/
 ```
 ## Architecture
 
