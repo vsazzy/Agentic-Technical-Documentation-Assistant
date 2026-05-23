@@ -1,11 +1,12 @@
 import streamlit as st
 
-from rag import answer_question
+from agent import run_agent
 from config import LLM_MODEL, EMBEDDING_MODEL, DOCS_DIR, DB_DIR
+from observability import build_observability_event, elapsed_ms, log_event, start_timer
 
 
 st.set_page_config(
-    page_title="Local SDK RAG Assistant",
+    page_title="Local SDK Agent",
     page_icon="🧠",
     layout="wide",
 )
@@ -18,8 +19,8 @@ def initialize_session_state() -> None:
 
 def render_sidebar() -> None:
     with st.sidebar:
-        st.title("Local SDK RAG")
-        st.write("Private documentation assistant running locally.")
+        st.title("Local SDK Agent")
+        st.write("Private agentic RAG assistant for SDK documentation.")
 
         st.divider()
 
@@ -36,8 +37,23 @@ def render_sidebar() -> None:
         st.subheader("Workflow")
         st.code(
             "uv run python ingest.py --reset\n"
-            "uv run streamlit run app.py",
+            "uv run streamlit run app.py\n"
+            "uv run streamlit run dashboard.py",
             language="bash",
+        )
+
+        st.divider()
+
+        st.subheader("Agent Features")
+        st.markdown(
+            """
+            - Planner
+            - Retrieval tool
+            - Citation validation
+            - Refusal logic
+            - Structured response
+            - Observability logging
+            """
         )
 
         st.divider()
@@ -53,19 +69,42 @@ def render_chat_history() -> None:
             st.markdown(message["content"])
 
 
+def render_agent_debug(result: dict) -> None:
+    with st.expander("Agent trace"):
+        planner = result.get("planner", {})
+
+        st.subheader("Planner")
+        st.json(planner)
+
+        st.subheader("Retrieval")
+        st.json(result.get("retrieval", {}))
+
+        st.subheader("Source Records")
+        st.json(result.get("source_records", []))
+
+    sources = result.get("sources", [])
+
+    if sources:
+        with st.expander("Sources used"):
+            for source in sources:
+                st.write(f"- {source}")
+
+
 def main() -> None:
     initialize_session_state()
     render_sidebar()
 
-    st.title("Local SDK Documentation Assistant")
+    st.title("Local SDK Agent")
     st.caption(
-        "Ask questions about hardware SDK docs. "
-        "Runs locally using Ollama, Chroma, LangChain, and Streamlit."
+        "A privacy-preserving agentic RAG assistant for hardware SDK documentation. "
+        "Runs locally using Ollama, ChromaDB, LangChain, and Streamlit."
     )
 
     render_chat_history()
 
-    question = st.chat_input("Ask about SDK setup, APIs, examples, errors, GPIO, UART, SPI, I2C...")
+    question = st.chat_input(
+        "Ask about SDK setup, APIs, examples, errors, GPIO, UART, SPI, I2C..."
+    )
 
     if not question:
         return
@@ -81,36 +120,75 @@ def main() -> None:
         st.markdown(question)
 
     with st.chat_message("assistant"):
-        with st.spinner("Searching local SDK docs..."):
-            answer, retrieved_docs, sources = answer_question(question)
+        timer = start_timer()
 
-        st.markdown(answer)
+        try:
+            with st.spinner("Planning, retrieving, validating sources, and generating answer..."):
+                result = run_agent(question)
 
-        if sources:
-            with st.expander("Sources used"):
-                for source in sources:
-                    st.write(f"- {source}")
+            latency = elapsed_ms(timer)
 
-        if retrieved_docs:
-            with st.expander("Retrieved context preview"):
-                for index, doc in enumerate(retrieved_docs, start=1):
-                    source = doc.metadata.get("source", "unknown source")
-                    page = doc.metadata.get("page")
+            answer = result.get(
+                "answer",
+                "I could not find this in the provided SDK documentation.",
+            )
 
-                    if page is not None:
-                        label = f"{source}, page {page + 1}"
-                    else:
-                        label = source
+            st.markdown(answer)
 
-                    st.markdown(f"**Chunk {index}: {label}**")
-                    st.code(doc.page_content[:1500])
+            render_agent_debug(result)
 
-    st.session_state.messages.append(
-        {
-            "role": "assistant",
-            "content": answer,
-        }
-    )
+            event = build_observability_event(
+                question=question,
+                result=result,
+                latency_ms=latency,
+                tool_call_success=True,
+            )
+
+            log_event(event)
+
+            st.session_state.messages.append(
+                {
+                    "role": "assistant",
+                    "content": answer,
+                }
+            )
+
+        except Exception as exc:
+            latency = elapsed_ms(timer)
+
+            error_answer = (
+                "Something went wrong while running the local SDK agent.\n\n"
+                f"Error: `{exc}`"
+            )
+
+            st.error(error_answer)
+
+            fallback_result = {
+                "answer": error_answer,
+                "intent": "error",
+                "planner": {},
+                "model": LLM_MODEL,
+                "refused": True,
+                "failure_reason": "runtime_error",
+                "retrieval": {},
+            }
+
+            event = build_observability_event(
+                question=question,
+                result=fallback_result,
+                latency_ms=latency,
+                tool_call_success=False,
+                error=str(exc),
+            )
+
+            log_event(event)
+
+            st.session_state.messages.append(
+                {
+                    "role": "assistant",
+                    "content": error_answer,
+                }
+            )
 
 
 if __name__ == "__main__":
