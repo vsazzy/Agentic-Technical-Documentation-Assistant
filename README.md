@@ -123,3 +123,32 @@ local-sdk-rag-assistant/
 ├── db/
 └── screenshots/
 ```
+
+flowchart TD
+    A[Hardware SDK Docs] --> B[Ingestion Pipeline]
+    B --> C[Chunking + Metadata]
+    C --> D[Local Embeddings]
+    D --> E[Chroma Vector DB]
+
+    F[User Query] --> G[Planner Agent]
+    G --> H{Intent}
+
+    H -->|SDK Question| I[Retrieval Tool]
+    H -->|Out of Scope| J[Refusal Tool]
+    H -->|Source Lookup| K[Source Inspector]
+
+    I --> L[Retrieved Chunks]
+    K --> L
+
+    L --> M[Citation Validator]
+    M --> N{Valid Sources?}
+
+    N -->|Yes| O[Local LLM Answer]
+    N -->|No| J
+
+    O --> P[Structured JSON Response]
+    J --> P
+
+    P --> Q[Streamlit UI]
+    P --> R[Observability Logger]
+    R --> S[Metrics Dashboard]
