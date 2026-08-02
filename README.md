@@ -4,6 +4,12 @@ A private local Retrieval-Augmented Generation assistant for hardware SDK docume
 
 This project lets you chat with SDK manuals, API references, code examples, and troubleshooting guides using a local LLM.
 
+This project requires a local `.env` file and a `docs/` folder for private docs. Both are ignored by Git to prevent tracking local secrets and private files.
+
+After cloning the repository, do the following to set them up:
+change your .env.example to .env and docs.example to docs
+*Note: Open your new `.env` file to add your local configuration values, and use the `docs/` folder for your private documents.*
+
 ## Demo Document
 
 For the public demo, this project uses the official Raspberry Pi Pico C/C++ SDK documentation PDF.
