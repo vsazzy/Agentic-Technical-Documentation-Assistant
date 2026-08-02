@@ -14,5 +14,7 @@ dependencies = [
     "langchain-text-splitters>=1.1.2",
     "pandas>=3.0.3",
     "pypdf>=6.11.0",
+    "python-dotenv>=1.2.2",
+    "slack-bolt>=1.28.0",
     "streamlit>=1.57.0",
 ]

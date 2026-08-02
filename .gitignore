@@ -27,3 +27,4 @@ docs/private/*
 
 # Environment files
 .env
+docs/
