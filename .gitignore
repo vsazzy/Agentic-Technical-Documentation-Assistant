@@ -28,3 +28,6 @@ docs/private/*
 # Environment files
 .env
 docs/
+
+# Local feature worktrees
+.worktrees/
