@@ -16,6 +16,7 @@ class ContentType(str, Enum):
     TEXT = "text"
     TABLE = "table"
     IMAGE = "image"
+    FIGURE = "figure"
 
 
 def _require_non_empty(value: str, field_name: str) -> None:
@@ -107,11 +108,13 @@ class NormalizedDocument:
     document_id: str
     filename: str
     blocks: tuple[ContentBlock, ...] = ()
+    warnings: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _require_non_empty(self.document_id, "document_id")
         _require_non_empty(self.filename, "filename")
         object.__setattr__(self, "blocks", tuple(self.blocks))
+        object.__setattr__(self, "warnings", tuple(self.warnings))
 
     @property
     def stats(self) -> ExtractionStats:
@@ -120,7 +123,10 @@ class NormalizedDocument:
             blocks=len(self.blocks),
             text_blocks=sum(block.content_type is ContentType.TEXT for block in self.blocks),
             tables=sum(block.content_type is ContentType.TABLE for block in self.blocks),
-            images=sum(block.content_type is ContentType.IMAGE for block in self.blocks),
+            images=sum(
+                block.content_type in {ContentType.IMAGE, ContentType.FIGURE}
+                for block in self.blocks
+            ),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -128,6 +134,7 @@ class NormalizedDocument:
             "document_id": self.document_id,
             "filename": self.filename,
             "blocks": [block.to_dict() for block in self.blocks],
+            "warnings": list(self.warnings),
         }
 
     def to_json(self) -> str:

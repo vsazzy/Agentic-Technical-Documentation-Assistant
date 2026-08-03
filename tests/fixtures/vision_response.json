@@ -1,0 +1,6 @@
+{
+  "message": {
+    "role": "assistant",
+    "content": "{\"summary\":\"A front-panel connection diagram.\",\"visible_text\":[\"WAN\",\"LAN1\",\"LAN2\"],\"relationships\":[\"WAN connects the appliance to the uplink.\"],\"steps\":[\"Connect WAN.\",\"Connect a workstation to LAN1.\"],\"confidence\":0.94}"
+  }
+}

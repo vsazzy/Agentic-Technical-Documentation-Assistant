@@ -33,6 +33,33 @@ def test_normalized_document_counts_content_types():
     assert doc.stats.pages == 2
 
 
+def test_normalized_document_counts_vision_figures_as_images():
+    doc = NormalizedDocument(
+        document_id="sha256:abc",
+        filename="guide.pdf",
+        blocks=[
+            ContentBlock("b1", ContentType.IMAGE, "native image", 1, 1),
+            ContentBlock("b2", ContentType.FIGURE, "vision figure", 2, 2),
+        ],
+    )
+
+    assert doc.stats.images == 2
+
+
+def test_normalized_document_freezes_and_serializes_warnings():
+    source_warnings = ["vision enrichment failed on page 2"]
+    doc = NormalizedDocument(
+        document_id="sha256:abc",
+        filename="guide.pdf",
+        warnings=source_warnings,
+    )
+
+    source_warnings.append("changed")
+
+    assert doc.warnings == ("vision enrichment failed on page 2",)
+    assert doc.to_dict()["warnings"] == ["vision enrichment failed on page 2"]
+
+
 @pytest.mark.parametrize(
     ("factory", "match"),
     [
@@ -71,7 +98,7 @@ def test_serialization_is_deterministic():
         '{"blocks":[{"block_id":"b1","content_type":"text","extraction_method":"docling",'
         '"metadata":{"a":2,"z":1},"page_end":1,"page_start":1,'
         '"section_path":["Introduction"],"text":"intro"}],'
-        '"document_id":"sha256:abc","filename":"guide.pdf"}'
+        '"document_id":"sha256:abc","filename":"guide.pdf","warnings":[]}'
     )
 
 
