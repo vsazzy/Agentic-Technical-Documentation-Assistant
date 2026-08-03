@@ -7,7 +7,7 @@ import os
 import sqlite3
 import unicodedata
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterator
 
@@ -89,9 +89,16 @@ class DocumentStore:
 
     def _ensure_directories(self) -> None:
         for directory in (self.docs_dir, self.managed_dir, self.staging_dir, self.registry_file.parent):
+            self._reject_symlink_ancestors(directory)
             directory.mkdir(parents=True, exist_ok=True)
-            if directory.is_symlink():
-                raise DocumentValidationError(f"storage directory cannot be a symlink: {directory}")
+            self._reject_symlink_ancestors(directory)
+
+    @staticmethod
+    def _reject_symlink_ancestors(path: Path) -> None:
+        absolute_path = Path(path).absolute()
+        for component in reversed((absolute_path, *absolute_path.parents)):
+            if component.is_symlink():
+                raise DocumentValidationError(f"storage path cannot include a symlink: {component}")
 
     @staticmethod
     def _is_contained(path: Path, root: Path) -> bool:
@@ -104,6 +111,7 @@ class DocumentStore:
         candidate = Path(path)
         if not self._is_contained(candidate, root):
             raise DocumentValidationError("document path escapes its managed directory")
+        self._reject_symlink_ancestors(candidate)
         try:
             relative = candidate.relative_to(root)
         except ValueError as error:
@@ -126,13 +134,32 @@ class DocumentStore:
         if not data.startswith(b"%PDF-"):
             raise DocumentValidationError("PDF signature is invalid")
 
+    def _hash_pdf_file(self, path: Path) -> tuple[str, int]:
+        size_bytes = path.stat().st_size
+        if size_bytes > self.max_pdf_bytes:
+            raise DocumentValidationError("PDF size exceeds configured limit")
+
+        sha256 = hashlib.sha256()
+        total_bytes = 0
+        with path.open("rb") as pdf_file:
+            signature = pdf_file.read(5)
+            if signature != b"%PDF-":
+                raise DocumentValidationError("PDF signature is invalid")
+            sha256.update(signature)
+            total_bytes = len(signature)
+            while chunk := pdf_file.read(1024 * 1024):
+                total_bytes += len(chunk)
+                if total_bytes > self.max_pdf_bytes:
+                    raise DocumentValidationError("PDF size exceeds configured limit")
+                sha256.update(chunk)
+        return sha256.hexdigest(), total_bytes
+
     def validate_pdf(self, path: Path) -> DocumentRecord:
         """Validate a managed PDF and return the immutable metadata to register."""
         self._ensure_directories()
         allowed_root = self.staging_dir if self._is_contained(Path(path), self.staging_dir) else self.docs_dir
         pdf_path = self._require_regular_contained_file(path, allowed_root)
-        data = pdf_path.read_bytes()
-        self._validate_pdf_bytes(data)
+        sha256, size_bytes = self._hash_pdf_file(pdf_path)
         try:
             with pymupdf.open(pdf_path) as document:
                 page_count = document.page_count
@@ -142,14 +169,13 @@ class DocumentStore:
             raise DocumentValidationError("PDF page count exceeds configured limit")
 
         filename = self.normalize_filename(pdf_path.name)
-        sha256 = hashlib.sha256(data).hexdigest()
         return DocumentRecord(
             document_id=f"sha256:{sha256}",
             filename=filename,
             normalized_filename=filename.casefold(),
             sha256=sha256,
             path=pdf_path.resolve(),
-            size_bytes=len(data),
+            size_bytes=size_bytes,
             page_count=page_count,
         )
 
@@ -249,6 +275,7 @@ class DocumentStore:
         connection = sqlite3.connect(self.registry_file)
         connection.row_factory = sqlite3.Row
         try:
+            connection.execute("PRAGMA foreign_keys = ON")
             self._create_schema(connection)
             yield connection
             connection.commit()
@@ -306,46 +333,119 @@ class DocumentStore:
             error=row["error"],
         )
 
-    def register(self, record: DocumentRecord) -> None:
-        """Register a document using SQLite constraints as the final duplicate guard."""
-        with self._connection() as connection:
-            existing = connection.execute(
-                """
-                SELECT document_id, sha256, normalized_filename
-                FROM documents
-                WHERE document_id = ? OR sha256 = ?
-                   OR (normalized_filename = ? AND status = 'active')
-                """,
-                (record.document_id, record.sha256, record.normalized_filename),
-            ).fetchone()
-            if existing is not None:
-                if existing["sha256"] == record.sha256:
-                    raise DocumentDuplicateError("duplicate sha256")
-                if existing["document_id"] == record.document_id:
-                    raise DocumentDuplicateError("duplicate document_id")
-                raise DocumentDuplicateError("duplicate active filename")
-            try:
-                connection.execute(
+    def _rollback_promoted_file(self, candidate_path: Path, *, preserve_path: Path | None = None) -> None:
+        candidate = Path(candidate_path)
+        if not self._is_contained(candidate, self.managed_dir):
+            return
+        self._reject_symlink_ancestors(candidate)
+        backup = candidate.with_name(f"{candidate.name}.backup")
+        if backup.exists():
+            self._require_regular_contained_file(backup, self.managed_dir)
+            candidate.unlink(missing_ok=True)
+            os.replace(backup, candidate)
+        elif preserve_path is None or candidate.resolve(strict=False) != Path(preserve_path).resolve(strict=False):
+            candidate.unlink(missing_ok=True)
+
+    def _remove_inactive_managed_file(self, path: Path, replacement: Path) -> None:
+        previous = Path(path)
+        if not self._is_contained(previous, self.managed_dir):
+            return
+        if previous.resolve(strict=False) == Path(replacement).resolve(strict=False):
+            return
+        if previous.exists():
+            self._require_regular_contained_file(previous, self.managed_dir)
+            previous.unlink()
+
+    def register(self, record: DocumentRecord) -> DocumentRecord:
+        """Register, idempotently reuse, or reactivate a document by content identity."""
+        active_record: DocumentRecord | None = None
+        rollback_path: Path | None = None
+        preserve_path: Path | None = None
+        inactive_path_to_remove: Path | None = None
+        try:
+            with self._connection() as connection:
+                existing_row = connection.execute(
+                    "SELECT * FROM documents WHERE document_id = ? OR sha256 = ?",
+                    (record.document_id, record.sha256),
+                ).fetchone()
+                name_conflict = connection.execute(
                     """
-                    INSERT INTO documents (
-                        document_id, filename, normalized_filename, sha256, path,
-                        size_bytes, page_count, status, error
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    SELECT * FROM documents
+                    WHERE normalized_filename = ? AND status = 'active'
                     """,
-                    (
-                        record.document_id,
-                        record.filename,
-                        record.normalized_filename,
-                        record.sha256,
-                        str(record.path),
-                        record.size_bytes,
-                        record.page_count,
-                        record.status,
-                        record.error,
-                    ),
-                )
-            except sqlite3.IntegrityError as error:
-                raise DocumentDuplicateError("duplicate document registry record") from error
+                    (record.normalized_filename,),
+                ).fetchone()
+                if existing_row is not None:
+                    existing = self._record_from_row(existing_row)
+                    if existing.sha256 != record.sha256:
+                        rollback_path = record.path
+                        preserve_path = existing.path
+                        raise DocumentDuplicateError("duplicate document_id")
+                    if existing.status == "active":
+                        active_record = existing
+                        rollback_path = record.path
+                        preserve_path = existing.path
+                    else:
+                        if name_conflict is not None and name_conflict["document_id"] != existing.document_id:
+                            rollback_path = record.path
+                            preserve_path = Path(name_conflict["path"])
+                            raise DocumentDuplicateError("duplicate active filename")
+                        active_record = replace(record, status="active", error=None)
+                        inactive_path_to_remove = existing.path
+                        connection.execute(
+                            """
+                            UPDATE documents
+                            SET filename = ?, normalized_filename = ?, path = ?, size_bytes = ?,
+                                page_count = ?, status = 'active', error = NULL
+                            WHERE document_id = ?
+                            """,
+                            (
+                                active_record.filename,
+                                active_record.normalized_filename,
+                                str(active_record.path),
+                                active_record.size_bytes,
+                                active_record.page_count,
+                                active_record.document_id,
+                            ),
+                        )
+                elif name_conflict is not None:
+                    rollback_path = record.path
+                    preserve_path = Path(name_conflict["path"])
+                    raise DocumentDuplicateError("duplicate active filename")
+                else:
+                    active_record = replace(record, status="active", error=None)
+                    connection.execute(
+                        """
+                        INSERT INTO documents (
+                            document_id, filename, normalized_filename, sha256, path,
+                            size_bytes, page_count, status, error
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            active_record.document_id,
+                            active_record.filename,
+                            active_record.normalized_filename,
+                            active_record.sha256,
+                            str(active_record.path),
+                            active_record.size_bytes,
+                            active_record.page_count,
+                            active_record.status,
+                            active_record.error,
+                        ),
+                    )
+        except sqlite3.IntegrityError as error:
+            self._rollback_promoted_file(record.path)
+            raise DocumentDuplicateError("duplicate document registry record") from error
+        except Exception:
+            if rollback_path is not None:
+                self._rollback_promoted_file(rollback_path, preserve_path=preserve_path)
+            raise
+        if rollback_path is not None:
+            self._rollback_promoted_file(rollback_path, preserve_path=preserve_path)
+        assert active_record is not None
+        if inactive_path_to_remove is not None:
+            self._remove_inactive_managed_file(inactive_path_to_remove, active_record.path)
+        return active_record
 
     def get_by_filename(self, name: str) -> DocumentRecord | None:
         normalized_name = self._normalized_filename_key(name)
@@ -369,14 +469,18 @@ class DocumentStore:
 
     def mark_failed(self, document_id: str, error: str) -> None:
         with self._connection() as connection:
-            connection.execute(
+            result = connection.execute(
                 "UPDATE documents SET status = 'failed', error = ? WHERE document_id = ?",
                 (error, document_id),
             )
+            if result.rowcount != 1:
+                raise KeyError(f"unknown document_id: {document_id}")
 
     def mark_deleted(self, document_id: str) -> None:
         with self._connection() as connection:
-            connection.execute(
+            result = connection.execute(
                 "UPDATE documents SET status = 'deleted' WHERE document_id = ?",
                 (document_id,),
             )
+            if result.rowcount != 1:
+                raise KeyError(f"unknown document_id: {document_id}")
