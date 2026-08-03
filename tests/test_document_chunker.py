@@ -260,7 +260,9 @@ def test_long_figure_caption_splits_bounded_chunks_with_complete_provenance():
     rendered = "\n".join(chunk.text for chunk in chunks)
     assert "Description:" in rendered
     assert "Summary:" in rendered
-    assert all(chunk.metadata["block_ids"] == ("caption", "vision") for chunk in chunks)
+    assert chunks[0].metadata["block_ids"] == ("caption",)
+    assert any(chunk.metadata["block_ids"] == ("caption", "vision") for chunk in chunks)
+    assert chunks[-1].metadata["block_ids"] == ("vision",)
 
 
 def test_retrieval_labels_distinguish_text_table_ocr_and_figure_without_image_label():
@@ -296,3 +298,55 @@ def test_every_overflow_boundary_in_a_compatible_run_has_overlap_without_crossin
     assert all(later[:8] == earlier[-8:] for earlier, later in zip(bodies, bodies[1:]))
     assert chunks[-1].section_path == ("Safety",)
     assert not chunks[-1].text.split("\n", 1)[1].startswith(bodies[-1][-8:])
+
+
+def test_tiny_body_budget_uses_positive_effective_overlap_at_whitespace_boundaries():
+    document = _document(
+        ContentBlock(
+            "tiny",
+            ContentType.TEXT,
+            "red blue green yellow orange purple",
+            1,
+            1,
+            ("A deeply nested section path that cannot fit",),
+        )
+    )
+
+    chunks = DocumentChunker(max_chars=10, overlap_chars=9).build(document)
+    bodies = [chunk.text.split("\n", 1)[1] for chunk in chunks]
+
+    assert all(len(chunk.text) <= 10 for chunk in chunks)
+    assert len(bodies) > 1
+    assert all(later[:2] == earlier[-2:] for earlier, later in zip(bodies, bodies[1:]))
+
+
+def test_split_piece_provenance_tracks_only_blocks_present_in_primary_or_overlap_text():
+    document = _document(
+        ContentBlock("page-1", ContentType.TEXT, "A" * 46, 1, 1, ("Setup",)),
+        ContentBlock("page-2", ContentType.TEXT, "B" * 46, 2, 2, ("Setup",)),
+        ContentBlock("page-3", ContentType.TEXT, "C" * 46, 3, 3, ("Setup",)),
+    )
+
+    chunks = DocumentChunker(max_chars=70, overlap_chars=8).build(document)
+
+    assert [chunk.metadata["block_ids"] for chunk in chunks] == [
+        ("page-1",),
+        ("page-1", "page-2"),
+        ("page-2",),
+        ("page-2", "page-3"),
+        ("page-3",),
+    ]
+    assert [(chunk.page_start, chunk.page_end) for chunk in chunks] == [
+        (1, 1),
+        (1, 2),
+        (2, 2),
+        (2, 3),
+        (3, 3),
+    ]
+    assert [chunk.metadata["extraction_methods"] for chunk in chunks] == [
+        ("docling",),
+        ("docling",),
+        ("docling",),
+        ("docling",),
+        ("docling",),
+    ]

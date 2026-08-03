@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 
 from document_models import ContentBlock, ContentType, IndexChunk, NormalizedDocument
 
@@ -46,13 +46,14 @@ class DocumentChunker:
             nonlocal split_ordinal
             if not text_run:
                 return
+            body, spans = self._body_from_blocks(text_run)
             emitted = self._make_chunks(
                 document,
-                tuple(text_run),
                 ContentType.TEXT,
                 self._retrieval_label(text_run[0]),
                 text_run[0].section_path,
-                "\n\n".join(self._block_text(block) for block in text_run),
+                body,
+                spans,
                 split_ordinal,
             )
             chunks.extend(emitted)
@@ -72,15 +73,14 @@ class DocumentChunker:
                 if block.content_type is ContentType.FIGURE
                 else ()
             )
-            blocks = (*caption_blocks, block)
-            body = self._figure_text(block, caption_blocks) if caption_blocks else self._block_text(block)
+            body, spans = self._figure_body(block, caption_blocks)
             emitted = self._make_chunks(
                 document,
-                blocks,
                 block.content_type,
                 self._retrieval_label(block),
                 block.section_path,
                 body,
+                spans,
                 split_ordinal,
             )
             chunks.extend(emitted)
@@ -174,31 +174,32 @@ class DocumentChunker:
     def _make_chunks(
         self,
         document: NormalizedDocument,
-        blocks: Sequence[ContentBlock],
         content_type: ContentType,
         retrieval_label: str,
         section_path: tuple[str, ...],
         body: str,
+        spans: Sequence[tuple[int, int, ContentBlock]],
         first_split_ordinal: int,
     ) -> list[IndexChunk]:
         header = self._header(retrieval_label, section_path)
         body_limit = self._max_chars - len(header) - 1
         parts = self._split_with_overlap(body, body_limit)
-        block_ids = tuple(block.block_id for block in blocks)
-        methods = tuple(dict.fromkeys(block.extraction_method for block in blocks))
-        page_start = min(block.page_start for block in blocks)
-        page_end = max(block.page_end for block in blocks)
-        metadata = {
-            "page_start": page_start,
-            "page_end": page_end,
-            "content_type": content_type.value,
-            "section_path": section_path,
-            "extraction_methods": methods,
-            "block_ids": block_ids,
-            "warnings": document.warnings,
-        }
         chunks: list[IndexChunk] = []
-        for offset, part in enumerate(parts):
+        for offset, (start, end) in enumerate(parts):
+            blocks = self._blocks_in_range(spans, start, end)
+            block_ids = tuple(block.block_id for block in blocks)
+            methods = tuple(dict.fromkeys(block.extraction_method for block in blocks))
+            page_start = min(block.page_start for block in blocks)
+            page_end = max(block.page_end for block in blocks)
+            metadata = {
+                "page_start": page_start,
+                "page_end": page_end,
+                "content_type": content_type.value,
+                "section_path": section_path,
+                "extraction_methods": methods,
+                "block_ids": block_ids,
+                "warnings": document.warnings,
+            }
             split_ordinal = first_split_ordinal + offset
             digest = hashlib.sha256(
                 "\x1f".join((document.document_id, *block_ids, str(split_ordinal))).encode("utf-8")
@@ -209,7 +210,7 @@ class DocumentChunker:
                     document_id=document.document_id,
                     filename=document.filename,
                     content_type=content_type,
-                    text=f"{header}\n{part}",
+                    text=f"{header}\n{body[start:end]}",
                     page_start=page_start,
                     page_end=page_end,
                     section_path=section_path,
@@ -218,6 +219,37 @@ class DocumentChunker:
                 )
             )
         return chunks
+
+    def _body_from_blocks(
+        self, blocks: Sequence[ContentBlock]
+    ) -> tuple[str, tuple[tuple[int, int, ContentBlock], ...]]:
+        parts: list[str] = []
+        spans: list[tuple[int, int, ContentBlock]] = []
+        cursor = 0
+        for index, block in enumerate(blocks):
+            start = cursor
+            text = self._block_text(block)
+            parts.append(text)
+            cursor += len(text)
+            if index < len(blocks) - 1:
+                parts.append("\n\n")
+                cursor += 2
+            spans.append((start, cursor, block))
+        return "".join(parts), tuple(spans)
+
+    @staticmethod
+    def _blocks_in_range(
+        spans: Sequence[tuple[int, int, ContentBlock]], start: int, end: int
+    ) -> tuple[ContentBlock, ...]:
+        blocks: list[ContentBlock] = []
+        seen_ids: set[str] = set()
+        for span_start, span_end, block in spans:
+            if start < span_end and end > span_start and block.block_id not in seen_ids:
+                blocks.append(block)
+                seen_ids.add(block.block_id)
+        if not blocks:
+            raise ValueError("chunk split did not include source content")
+        return tuple(blocks)
 
     def _header(self, retrieval_label: str, section_path: tuple[str, ...]) -> str:
         budget = self._max_chars - 2
@@ -228,30 +260,54 @@ class DocumentChunker:
         compact = f"[{retrieval_label}] Section: …"
         return compact if len(compact) <= budget else f"[{retrieval_label}]"
 
-    def _split_with_overlap(self, text: str, limit: int) -> tuple[str, ...]:
-        """Split one compatible semantic unit with exact overlap at every boundary."""
+    def _split_with_overlap(self, text: str, limit: int) -> tuple[tuple[int, int], ...]:
+        """Return bounded source ranges with effective overlap and guaranteed progress."""
         if len(text) <= limit:
-            return (text,)
+            return ((0, len(text)),)
+        if self._overlap_chars and limit < 2:
+            raise ValueError("max_chars leaves no room for positive body overlap")
 
-        parts: list[str] = []
+        overlap = min(self._overlap_chars, max(0, limit - 1))
+
+        parts: list[tuple[int, int]] = []
         start = 0
         while start < len(text):
             end = min(start + limit, len(text))
             if end < len(text):
                 boundary = max(
-                    text.rfind("\n", start + 1, end + 1),
-                    text.rfind(" ", start + 1, end + 1),
+                    text.rfind("\n", start + 1, end),
+                    text.rfind(" ", start + 1, end),
                 )
-                if boundary > start:
+                if boundary >= start + overlap:
                     end = boundary + 1
-            parts.append(text[start:end])
+            if end - start <= overlap and end < len(text):
+                end = min(start + limit, len(text))
+            parts.append((start, end))
             if end == len(text):
                 break
-            next_start = end - self._overlap_chars
-            start = next_start if next_start > start else end
+            start = end - overlap
         return tuple(parts)
 
-    @staticmethod
-    def _figure_text(figure: ContentBlock, captions: Sequence[ContentBlock]) -> str:
-        caption_text = "\n\n".join(DocumentChunker._block_text(caption) for caption in captions)
-        return f"Caption: {caption_text}\n\nDescription: {DocumentChunker._block_text(figure)}"
+    def _figure_body(
+        self, figure: ContentBlock, captions: Sequence[ContentBlock]
+    ) -> tuple[str, tuple[tuple[int, int, ContentBlock], ...]]:
+        if not captions:
+            return self._body_from_blocks((figure,))
+
+        caption_text, caption_spans = self._body_from_blocks(captions)
+        caption_prefix = "Caption: "
+        description_prefix = "\n\nDescription: "
+        figure_text = self._block_text(figure)
+        body = f"{caption_prefix}{caption_text}{description_prefix}{figure_text}"
+        spans = [
+            (
+                0 if index == 0 else start + len(caption_prefix),
+                end + len(caption_prefix),
+                block,
+            )
+            for index, (start, end, block) in enumerate(caption_spans)
+        ]
+        spans.append(
+            (len(caption_prefix) + len(caption_text), len(body), figure)
+        )
+        return body, tuple(spans)
