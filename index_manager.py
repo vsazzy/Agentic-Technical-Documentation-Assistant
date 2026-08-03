@@ -24,6 +24,9 @@ from config import (
 from document_models import IndexChunk
 
 
+INDEX_VERIFICATION_MARKER = ".verified-index.json"
+
+
 class IndexBuildError(RuntimeError):
     """Raised when an index mutation or version build cannot complete safely."""
 
@@ -223,6 +226,29 @@ class IndexManager:
         finally:
             temporary.unlink(missing_ok=True)
 
+    def _write_verification_marker(
+        self,
+        path: Path,
+        expected_document_ids: set[str],
+        expected_chunk_count: int,
+    ) -> None:
+        version_path = self._require_version_path(path)
+        marker = version_path / INDEX_VERIFICATION_MARKER
+        temporary = marker.with_name(f".{marker.name}.{uuid.uuid4().hex}.tmp")
+        payload = {
+            "document_ids": sorted(expected_document_ids),
+            "chunk_count": expected_chunk_count,
+        }
+        try:
+            with temporary.open("x", encoding="utf-8") as marker_file:
+                json.dump(payload, marker_file, sort_keys=True)
+                marker_file.write("\n")
+                marker_file.flush()
+                os.fsync(marker_file.fileno())
+            os.replace(temporary, marker)
+        finally:
+            temporary.unlink(missing_ok=True)
+
     def _require_version_path(self, path: Path) -> Path:
         candidate = Path(path).resolve()
         try:
@@ -348,6 +374,11 @@ class IndexManager:
             )
             store.close()
             store = None
+            self._write_verification_marker(
+                candidate_path,
+                active_document_ids | {document_id},
+                active_count - existing_count + len(materialized),
+            )
             self._write_active_pointer(candidate_path)
             switched = True
         except Exception as error:
@@ -391,6 +422,11 @@ class IndexManager:
             )
             store.close()
             store = None
+            self._write_verification_marker(
+                candidate_path,
+                active_document_ids - {document_id},
+                len(self._ids(active_result)) - existing_count,
+            )
             self._write_active_pointer(candidate_path)
             switched = True
         except Exception as error:
@@ -531,6 +567,7 @@ class IndexManager:
             self._verify_store(store, expected_ids, expected_count)
             store.close()
             store = None
+            self._write_verification_marker(candidate_path, expected_ids, expected_count)
             self._write_active_pointer(candidate_path)
             switched = True
         except Exception as error:
