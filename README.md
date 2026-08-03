@@ -85,6 +85,71 @@ uv run python ingest.py --reset
 uv run streamlit run app.py
 ```
 
+## Slack bot and PDF management
+
+The bot answers questions and lets every member of one configured Slack channel
+manage the local PDF corpus. After Slack downloads a private upload, extraction,
+vision analysis, embeddings, storage, and retrieval stay on this machine.
+
+### Slack app configuration
+
+Enable **Socket Mode** and create an app-level token with `connections:write`.
+Add these bot token scopes:
+
+```text
+app_mentions:read
+channels:history
+chat:write
+commands
+files:read
+groups:history       # also required when the management channel is private
+```
+
+Subscribe to the `app_mention` bot event. Create these slash commands (the
+request URL is not used in Socket Mode):
+
+```text
+/ask-sdk
+/rag-add
+/rag-list
+/rag-remove
+```
+
+Invite the bot to the question channels and to the dedicated management
+channel. Copy `.env.example` to `.env`, then set the three Slack credentials and
+the management channel ID:
+
+```bash
+cp .env.example .env
+uv run python slack_bot.py
+```
+
+### Slack usage
+
+```text
+/ask-sdk How do I follow the installation walkthrough?
+/rag-list
+/rag-add manual.pdf
+/rag-remove manual.pdf
+```
+
+For `/rag-add`, first upload the PDF in the management channel, then run the
+command. The filename is optional; when provided it selects that exact recent
+upload. You can also upload one PDF while mentioning the bot and write
+`please add this PDF`.
+
+Removal always presents **Confirm deletion** and **Cancel** buttons. Only the
+requesting member can confirm, and confirmations expire after ten minutes. A
+confirmed removal deletes the local PDF and rebuilds the index from every
+remaining PDF. Approved Slack uploads live in `docs/managed/`; incomplete
+downloads live briefly in `docs/staging/` and are never indexed.
+
+The Streamlit demo uses the same active multimodal index:
+
+```bash
+uv run streamlit run app.py
+```
+
 ## Example Questions
 
 ```text
