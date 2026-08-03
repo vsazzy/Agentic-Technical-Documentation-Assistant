@@ -8,7 +8,12 @@ import pytest
 
 import index_manager
 from document_models import ContentType, IndexChunk
-from index_manager import IndexBuildError, IndexManager, IndexVerificationError
+from index_manager import (
+    IndexBuildError,
+    IndexCleanupError,
+    IndexManager,
+    IndexVerificationError,
+)
 
 
 class FakeVectorStore:
@@ -257,6 +262,63 @@ def test_chroma_adapter_closes_its_persistent_client() -> None:
     adapter.close()
 
     assert FakeChroma._client.close_calls == 1
+
+
+def test_one_shot_chroma_close_failure_is_retried_and_classified_as_cleanup(
+    manager: IndexManager,
+    fake_factory: FakeStoreFactory,
+    chunks: list[IndexChunk],
+) -> None:
+    manager.upsert_document(chunks)
+    old_path = manager.active_db_path()
+    paths_before_rebuild = set(fake_factory.stores)
+    clients: dict[Path, object] = {}
+
+    class OneShotCloseClient:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+            if self.close_calls == 1:
+                raise RuntimeError("transient client close failure")
+
+    class ChromaShapedBackend:
+        def __init__(self, store: FakeVectorStore, client: OneShotCloseClient) -> None:
+            self._store = store
+            self._client = client
+
+        def add_documents(self, documents, *, ids):
+            return self._store.add_documents(documents, ids=ids)
+
+        def get(self, **arguments):
+            return self._store.get(**arguments)
+
+        def delete(self, *, ids):
+            return self._store.delete(ids=ids)
+
+    def adapter_factory(path: Path):
+        if path == old_path:
+            return fake_factory(path)
+        raw_store = fake_factory(path)
+        client = OneShotCloseClient()
+        clients[path] = client
+        return index_manager._ChromaStore(ChromaShapedBackend(raw_store, client))
+
+    manager._store_factory = adapter_factory
+
+    with pytest.raises(IndexCleanupError, match="cleanup") as raised:
+        manager.rebuild([chunks])
+
+    candidate_paths = set(fake_factory.stores) - paths_before_rebuild
+    assert len(candidate_paths) == 1
+    candidate_path = candidate_paths.pop()
+    assert clients[candidate_path].close_calls == 2
+    assert raised.value.resource_path == candidate_path
+    assert raised.value.close_error is not None
+    assert raised.value.stale_path is None
+    assert manager.active_db_path() == old_path
+    assert not candidate_path.exists()
 
 
 def test_upsert_uses_explicit_stable_ids_and_complete_chunk_metadata(

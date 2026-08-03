@@ -35,9 +35,22 @@ class IndexVerificationError(IndexBuildError):
 class IndexCleanupError(IndexBuildError):
     """Raised when a failed or retired index version cannot be fully cleaned."""
 
-    def __init__(self, message: str, *, stale_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        stale_path: Path | None = None,
+        resource_path: Path | None = None,
+        close_error: Exception | None = None,
+    ) -> None:
         super().__init__(message)
         self.stale_path = stale_path
+        self.resource_path = resource_path
+        self.close_error = close_error
+
+
+class _StoreCloseError(RuntimeError):
+    """Marks a close failure whose underlying store remains retryable."""
 
 
 class VectorStore(Protocol):
@@ -126,7 +139,9 @@ class _ChromaStore:
             # client has a public close operation. Closing it is required before
             # copying or deleting the SQLite-backed version directory.
             store._client.close()
-        finally:
+        except Exception as error:
+            raise _StoreCloseError("Chroma client close failed") from error
+        else:
             self._store = None
 
 
@@ -440,6 +455,9 @@ class IndexManager:
     ) -> None:
         close_error: Exception | None = None
         remove_error: Exception | None = None
+        initial_close_error = (
+            operation_error if isinstance(operation_error, _StoreCloseError) else None
+        )
         try:
             if store is not None:
                 store.close()
@@ -452,15 +470,18 @@ class IndexManager:
             except Exception as error:
                 remove_error = error
 
-        if close_error is not None or remove_error is not None:
+        reported_close_error = close_error or initial_close_error
+        if reported_close_error is not None or remove_error is not None:
             failures = []
-            if close_error is not None:
+            if reported_close_error is not None:
                 failures.append("store close")
             if remove_error is not None:
                 failures.append("directory removal")
             raise IndexCleanupError(
                 f"candidate cleanup failed ({' and '.join(failures)})",
                 stale_path=candidate_path if remove_error is not None else None,
+                resource_path=candidate_path,
+                close_error=reported_close_error,
             ) from operation_error
         if isinstance(operation_error, IndexBuildError):
             raise operation_error
