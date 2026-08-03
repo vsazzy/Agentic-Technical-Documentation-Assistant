@@ -73,3 +73,31 @@ def test_serialization_is_deterministic():
         '"section_path":["Introduction"],"text":"intro"}],'
         '"document_id":"sha256:abc","filename":"guide.pdf"}'
     )
+
+
+def test_contract_collections_cannot_be_mutated_after_validation():
+    source_metadata = {"source": "native"}
+    block = ContentBlock("b1", ContentType.TEXT, "intro", 1, 1, metadata=source_metadata)
+    source_blocks = [block]
+    document = NormalizedDocument("sha256:abc", "guide.pdf", source_blocks)
+    chunk = IndexChunk("c1", "sha256:abc", "guide.pdf", ContentType.TEXT, "intro", 1, 1)
+
+    source_metadata["source"] = "changed"
+    source_blocks.append(ContentBlock("b2", ContentType.TABLE, "|A|", 2, 2))
+
+    assert document.blocks == (block,)
+    assert document.blocks[0].metadata["source"] == "native"
+    with pytest.raises(TypeError):
+        block.metadata["source"] = "changed"
+    with pytest.raises(TypeError):
+        chunk.metadata["source"] = "changed"
+
+
+def test_serialization_returns_copies_of_contract_metadata():
+    block = ContentBlock("b1", ContentType.TEXT, "intro", 1, 1, metadata={"source": "native"})
+    document = NormalizedDocument("sha256:abc", "guide.pdf", [block])
+
+    serialized = document.to_dict()
+    serialized["blocks"][0]["metadata"]["source"] = "changed"
+
+    assert document.blocks[0].metadata["source"] == "native"

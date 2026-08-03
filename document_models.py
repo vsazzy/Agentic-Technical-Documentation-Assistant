@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
+from types import MappingProxyType
 
 
 class ContentType(str, Enum):
@@ -35,6 +37,26 @@ def _normalize_content_type(content_type: ContentType | str) -> ContentType:
         raise ValueError(f"content_type must be one of: {', '.join(t.value for t in ContentType)}") from error
 
 
+def _freeze_metadata(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _freeze_metadata(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_metadata(item) for item in value)
+    if isinstance(value, set):
+        return frozenset(_freeze_metadata(item) for item in value)
+    return value
+
+
+def _serialize_metadata(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _serialize_metadata(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_serialize_metadata(item) for item in value]
+    if isinstance(value, frozenset):
+        return sorted(_serialize_metadata(item) for item in value)
+    return value
+
+
 @dataclass(frozen=True)
 class ContentBlock:
     block_id: str
@@ -43,7 +65,7 @@ class ContentBlock:
     page_start: int
     page_end: int
     section_path: tuple[str, ...] = ()
-    metadata: dict[str, Any] = field(default_factory=dict)
+    metadata: Mapping[str, Any] = field(default_factory=dict)
     extraction_method: str = "docling"
 
     def __post_init__(self) -> None:
@@ -53,7 +75,7 @@ class ContentBlock:
         _validate_page_range(self.page_start, self.page_end)
         object.__setattr__(self, "content_type", _normalize_content_type(self.content_type))
         object.__setattr__(self, "section_path", tuple(self.section_path))
-        object.__setattr__(self, "metadata", dict(self.metadata))
+        object.__setattr__(self, "metadata", _freeze_metadata(self.metadata))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -63,7 +85,7 @@ class ContentBlock:
             "page_start": self.page_start,
             "page_end": self.page_end,
             "section_path": list(self.section_path),
-            "metadata": self.metadata,
+            "metadata": _serialize_metadata(self.metadata),
             "extraction_method": self.extraction_method,
         }
 
@@ -84,12 +106,12 @@ class ExtractionStats:
 class NormalizedDocument:
     document_id: str
     filename: str
-    blocks: list[ContentBlock] = field(default_factory=list)
+    blocks: tuple[ContentBlock, ...] = ()
 
     def __post_init__(self) -> None:
         _require_non_empty(self.document_id, "document_id")
         _require_non_empty(self.filename, "filename")
-        object.__setattr__(self, "blocks", list(self.blocks))
+        object.__setattr__(self, "blocks", tuple(self.blocks))
 
     @property
     def stats(self) -> ExtractionStats:
@@ -122,7 +144,7 @@ class IndexChunk:
     page_start: int
     page_end: int
     section_path: tuple[str, ...] = ()
-    metadata: dict[str, Any] = field(default_factory=dict)
+    metadata: Mapping[str, Any] = field(default_factory=dict)
     extraction_method: str = "docling"
 
     def __post_init__(self) -> None:
@@ -134,7 +156,7 @@ class IndexChunk:
         _validate_page_range(self.page_start, self.page_end)
         object.__setattr__(self, "content_type", _normalize_content_type(self.content_type))
         object.__setattr__(self, "section_path", tuple(self.section_path))
-        object.__setattr__(self, "metadata", dict(self.metadata))
+        object.__setattr__(self, "metadata", _freeze_metadata(self.metadata))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -146,7 +168,7 @@ class IndexChunk:
             "page_start": self.page_start,
             "page_end": self.page_end,
             "section_path": list(self.section_path),
-            "metadata": self.metadata,
+            "metadata": _serialize_metadata(self.metadata),
             "extraction_method": self.extraction_method,
         }
 
