@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from document_models import ContentType
-from pdf_extractor import PdfExtractionError, PdfExtractor
+from pdf_extractor import DoclingBackend, PdfExtractionError, PdfExtractor
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "docling_document.json"
@@ -118,6 +118,27 @@ def test_extract_wraps_conversion_and_normalization_failures(tmp_path, docling_d
     with pytest.raises(PdfExtractionError, match="one-based") as normalization:
         PdfExtractor(FakeBackend(docling_document)).extract(tmp_path / "guide.pdf", "sha256:abc")
     assert normalization.value.stage == "normalize"
+
+
+def test_partial_docling_conversion_fails_with_sanitized_error_details(tmp_path, docling_document):
+    class PartialConverter:
+        def convert(self, path: Path):
+            return SimpleNamespace(
+                status="partial_success",
+                document=docling_document,
+                errors=(
+                    SimpleNamespace(error_message="layout failed on page 2"),
+                    SimpleNamespace(error_message="table recognition timed out"),
+                ),
+            )
+
+    extractor = PdfExtractor(DoclingBackend(PartialConverter()))
+
+    with pytest.raises(PdfExtractionError) as error:
+        extractor.extract(tmp_path / "guide.pdf", "sha256:abc")
+
+    assert error.value.stage == "convert"
+    assert error.value.message == "layout failed on page 2; table recognition timed out"
 
 
 def test_extract_rejects_documents_without_normalized_blocks(tmp_path):

@@ -73,9 +73,13 @@ class DoclingBackend:
 
         result = self._converter.convert(Path(path))  # type: ignore[attr-defined]
         status = _enum_value(getattr(result, "status", "success"))
-        if status not in {"success", "partial_success"}:
+        if status != "success":
             errors = getattr(result, "errors", ())
-            detail = "; ".join(_conversion_error_message(error) for error in errors)
+            detail = "; ".join(
+                message
+                for error in errors
+                if (message := _conversion_error_message(error))
+            )
             raise RuntimeError(detail or f"Docling conversion ended with status {status}")
         document = getattr(result, "document", None)
         if document is None:
@@ -419,5 +423,5 @@ def _conversion_error_message(error: object) -> str:
     for field in ("error_message", "message"):
         value = getattr(error, field, None)
         if value:
-            return str(value)
-    return str(error)
+            return " ".join(str(value).split())
+    return " ".join(str(error).split())
