@@ -1,4 +1,5 @@
 from dataclasses import replace
+import sqlite3
 
 import pymupdf
 import pytest
@@ -154,6 +155,22 @@ def test_register_restores_prior_file_when_registration_fails(store, pdf_bytes):
     assert not (store.managed_dir / "guide.pdf.backup").exists()
 
 
+def test_register_removes_promoted_candidate_after_generic_registry_failure(store, pdf_bytes, monkeypatch):
+    candidate_path = store.promote(store.stage_bytes("candidate.pdf", pdf_bytes))
+    candidate = store.validate_pdf(candidate_path)
+
+    def raise_operational_error(_connection):
+        raise sqlite3.OperationalError("registry unavailable")
+
+    monkeypatch.setattr(store, "_create_schema", raise_operational_error)
+
+    with pytest.raises(sqlite3.OperationalError, match="registry unavailable"):
+        store.register(candidate)
+
+    assert [path.name for path in store.discover_corpus()] == []
+    assert not candidate_path.exists()
+
+
 def test_register_active_sha256_retry_is_idempotent_and_removes_extra_file(store, pdf_bytes):
     active_path = store.promote(store.stage_bytes("guide.pdf", pdf_bytes))
     active_record = store.validate_pdf(active_path)
@@ -262,3 +279,42 @@ def test_store_rejects_symlinked_configured_directory_ancestor(store, tmp_path, 
 
     with pytest.raises(DocumentValidationError, match="symlink"):
         linked_store.stage_bytes("guide.pdf", pdf_bytes)
+
+
+def test_discover_corpus_rejects_symlinked_docs_root(tmp_path):
+    actual_docs = tmp_path / "actual-docs"
+    actual_docs.mkdir()
+    docs_link = tmp_path / "docs-link"
+    docs_link.symlink_to(actual_docs, target_is_directory=True)
+    linked_store = DocumentStore(
+        docs_dir=docs_link,
+        managed_dir=docs_link / "managed",
+        staging_dir=docs_link / "staging",
+        registry_file=tmp_path / "db" / "registry.sqlite3",
+    )
+
+    with pytest.raises(DocumentValidationError, match="symlink"):
+        linked_store.discover_corpus()
+
+
+@pytest.mark.parametrize("managed_kind", ["ancestor", "leaf"])
+def test_discover_corpus_rejects_symlinked_managed_directory(store, tmp_path, managed_kind):
+    store.docs_dir.mkdir(parents=True)
+    symlink_target = tmp_path / "outside"
+    symlink_target.mkdir()
+    if managed_kind == "ancestor":
+        linked_ancestor = store.docs_dir / "linked"
+        linked_ancestor.symlink_to(symlink_target, target_is_directory=True)
+        managed_dir = linked_ancestor / "managed"
+    else:
+        managed_dir = store.docs_dir / "managed"
+        managed_dir.symlink_to(symlink_target, target_is_directory=True)
+    linked_store = DocumentStore(
+        docs_dir=store.docs_dir,
+        managed_dir=managed_dir,
+        staging_dir=store.staging_dir,
+        registry_file=store.registry_file,
+    )
+
+    with pytest.raises(DocumentValidationError, match="symlink"):
+        linked_store.discover_corpus()

@@ -244,6 +244,8 @@ class DocumentStore:
 
     def discover_corpus(self) -> list[Path]:
         """Discover root and managed PDFs, deliberately excluding in-progress staging files."""
+        self._reject_symlink_ancestors(self.docs_dir)
+        self._reject_symlink_ancestors(self.managed_dir)
         discovered: list[Path] = []
         if self.docs_dir.is_dir():
             discovered.extend(
@@ -437,8 +439,7 @@ class DocumentStore:
             self._rollback_promoted_file(record.path)
             raise DocumentDuplicateError("duplicate document registry record") from error
         except Exception:
-            if rollback_path is not None:
-                self._rollback_promoted_file(rollback_path, preserve_path=preserve_path)
+            self._rollback_promoted_file(rollback_path or record.path, preserve_path=preserve_path)
             raise
         if rollback_path is not None:
             self._rollback_promoted_file(rollback_path, preserve_path=preserve_path)
