@@ -24,3 +24,11 @@ dependencies = [
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+filterwarnings = [
+    # PyMuPDF 1.29.0's compiled SWIG bindings emit these at import time. The
+    # warning location is synthetic (<frozen importlib._bootstrap>), so no
+    # dependency module name is available for a module-scoped filter.
+    "ignore:^builtin type SwigPyPacked has no __module__ attribute$:DeprecationWarning",
+    "ignore:^builtin type SwigPyObject has no __module__ attribute$:DeprecationWarning",
+    "ignore:^builtin type swigvarlink has no __module__ attribute$:DeprecationWarning",
+]
