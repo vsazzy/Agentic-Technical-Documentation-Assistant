@@ -1,0 +1,138 @@
+{
+  "schema_name": "DoclingDocument",
+  "version": "1.10.0",
+  "name": "guide",
+  "body": {
+    "self_ref": "#/body",
+    "children": [
+      {"cref": "#/texts/0"},
+      {"cref": "#/texts/1"},
+      {"cref": "#/tables/0"},
+      {"cref": "#/texts/2"},
+      {"cref": "#/texts/3"},
+      {"cref": "#/pictures/0"}
+    ]
+  },
+  "texts": [
+    {
+      "self_ref": "#/texts/0",
+      "label": "section_header",
+      "level": 1,
+      "text": "Installation",
+      "orig": "Installation",
+      "prov": [
+        {
+          "page_no": 1,
+          "bbox": {"l": 54.0, "t": 72.0, "r": 210.0, "b": 92.0, "coord_origin": "TOPLEFT"},
+          "charspan": [0, 12]
+        }
+      ]
+    },
+    {
+      "self_ref": "#/texts/1",
+      "label": "paragraph",
+      "text": "Connect the appliance before configuration.",
+      "orig": "Connect the appliance before configuration.",
+      "prov": [
+        {
+          "page_no": 1,
+          "bbox": {"l": 54.0, "t": 105.0, "r": 430.0, "b": 132.0, "coord_origin": "TOPLEFT"},
+          "charspan": [0, 43]
+        }
+      ]
+    },
+    {
+      "self_ref": "#/texts/2",
+      "label": "list_item",
+      "text": "Verify the status LED.",
+      "orig": "Verify the status LED.",
+      "enumerated": false,
+      "marker": "-",
+      "prov": [
+        {
+          "page_no": 3,
+          "bbox": {"l": 62.0, "t": 390.0, "r": 310.0, "b": 412.0, "coord_origin": "TOPLEFT"},
+          "charspan": [0, 22]
+        }
+      ]
+    },
+    {
+      "self_ref": "#/texts/3",
+      "label": "handwritten_text",
+      "text": "OCR serial: A1-2048",
+      "orig": "OCR serial: A1-2048",
+      "prov": [
+        {
+          "page_no": 4,
+          "bbox": {"l": 65.0, "t": 120.0, "r": 260.0, "b": 148.0, "coord_origin": "TOPLEFT"},
+          "charspan": [0, 19]
+        }
+      ]
+    },
+    {
+      "self_ref": "#/texts/4",
+      "label": "caption",
+      "text": "Figure 1: Front-panel connections",
+      "orig": "Figure 1: Front-panel connections",
+      "prov": [
+        {
+          "page_no": 4,
+          "bbox": {"l": 80.0, "t": 520.0, "r": 380.0, "b": 542.0, "coord_origin": "TOPLEFT"},
+          "charspan": [0, 33]
+        }
+      ]
+    }
+  ],
+  "tables": [
+    {
+      "self_ref": "#/tables/0",
+      "label": "table",
+      "captions": [],
+      "prov": [
+        {
+          "page_no": 2,
+          "bbox": {"l": 55.0, "t": 180.0, "r": 500.0, "b": 720.0, "coord_origin": "TOPLEFT"},
+          "charspan": [0, 40]
+        },
+        {
+          "page_no": 3,
+          "bbox": {"l": 55.0, "t": 70.0, "r": 500.0, "b": 350.0, "coord_origin": "TOPLEFT"},
+          "charspan": [40, 79]
+        }
+      ],
+      "data": {
+        "num_rows": 3,
+        "num_cols": 2,
+        "table_cells": [
+          {"text": "Port", "start_row_offset_idx": 0, "end_row_offset_idx": 1, "start_col_offset_idx": 0, "end_col_offset_idx": 1, "column_header": true},
+          {"text": "Purpose", "start_row_offset_idx": 0, "end_row_offset_idx": 1, "start_col_offset_idx": 1, "end_col_offset_idx": 2, "column_header": true},
+          {"text": "ETH0", "start_row_offset_idx": 1, "end_row_offset_idx": 2, "start_col_offset_idx": 0, "end_col_offset_idx": 1},
+          {"text": "Management", "start_row_offset_idx": 1, "end_row_offset_idx": 2, "start_col_offset_idx": 1, "end_col_offset_idx": 2},
+          {"text": "ETH1", "start_row_offset_idx": 2, "end_row_offset_idx": 3, "start_col_offset_idx": 0, "end_col_offset_idx": 1},
+          {"text": "Data", "start_row_offset_idx": 2, "end_row_offset_idx": 3, "start_col_offset_idx": 1, "end_col_offset_idx": 2}
+        ]
+      }
+    }
+  ],
+  "pictures": [
+    {
+      "self_ref": "#/pictures/0",
+      "label": "picture",
+      "captions": [{"cref": "#/texts/4"}],
+      "prov": [
+        {
+          "page_no": 4,
+          "bbox": {"l": 75.0, "t": 180.0, "r": 480.0, "b": 500.0, "coord_origin": "TOPLEFT"},
+          "charspan": [0, 0]
+        }
+      ]
+    }
+  ],
+  "groups": [],
+  "pages": {
+    "1": {"page_no": 1, "size": {"width": 612.0, "height": 792.0}},
+    "2": {"page_no": 2, "size": {"width": 612.0, "height": 792.0}},
+    "3": {"page_no": 3, "size": {"width": 612.0, "height": 792.0}},
+    "4": {"page_no": 4, "size": {"width": 612.0, "height": 792.0}}
+  }
+}
