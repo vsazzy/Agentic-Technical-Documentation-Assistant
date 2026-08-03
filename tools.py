@@ -1,10 +1,30 @@
+import json
+from collections.abc import Mapping, Sequence
 from typing import Any, Dict, List, Tuple
 
 from langchain_core.documents import Document
 from langchain_chroma import Chroma
 
 from config import RELEVANCE_THRESHOLD, TOP_K
-from rag import get_vector_db, format_sources
+from rag import (
+    document_source_name,
+    format_sources,
+    get_vector_db,
+    source_page_range,
+)
+
+
+def _section_path(metadata: Mapping[str, Any]) -> list[str]:
+    value = metadata.get("section_path", ())
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError:
+            return [value] if value.strip() else []
+        value = decoded
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        return [str(part) for part in value]
+    return []
 
 
 def retrieve_docs_tool(question: str) -> Tuple[List[Document], List[Dict[str, Any]]]:
@@ -28,12 +48,18 @@ def retrieve_docs_tool(question: str) -> Tuple[List[Document], List[Dict[str, An
     source_records: List[Dict[str, Any]] = []
 
     for doc, score in docs_with_scores:
-        source = doc.metadata.get("source", "unknown source")
-        page = doc.metadata.get("page")
+        source = document_source_name(doc.metadata)
+        page_start, page_end = source_page_range(doc.metadata)
+        page = page_start if page_start == page_end else None
 
         record = {
             "source": source,
-            "page": page + 1 if page is not None else None,
+            "page": page,
+            "page_start": page_start,
+            "page_end": page_end,
+            "content_type": doc.metadata.get("content_type"),
+            "section_path": _section_path(doc.metadata),
+            "extraction_method": doc.metadata.get("extraction_method"),
             "score": round(float(score), 4),
             "passed_threshold": bool(score >= RELEVANCE_THRESHOLD),
         }
