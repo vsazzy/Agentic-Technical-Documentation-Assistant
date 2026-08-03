@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import shutil
@@ -9,6 +10,7 @@ import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import urlsplit
 
 from langchain_core.documents import Document
 
@@ -30,6 +32,14 @@ class IndexVerificationError(IndexBuildError):
     """Raised when an index does not contain the expected corpus."""
 
 
+class IndexCleanupError(IndexBuildError):
+    """Raised when a failed or retired index version cannot be fully cleaned."""
+
+    def __init__(self, message: str, *, stale_path: Path | None = None) -> None:
+        super().__init__(message)
+        self.stale_path = stale_path
+
+
 class VectorStore(Protocol):
     """The small vector-store surface needed by :class:`IndexManager`."""
 
@@ -48,6 +58,38 @@ class VectorStore(Protocol):
 
 
 StoreFactory = Callable[[Path], VectorStore]
+SnapshotIndex = Callable[[Path, Path], None]
+RemoveIndex = Callable[[Path], None]
+
+
+def _validate_local_base_url(base_url: str) -> str:
+    if not isinstance(base_url, str) or not base_url.strip():
+        raise ValueError("Ollama base URL must be a local loopback URL")
+    normalized = base_url.strip()
+    parsed = urlsplit(normalized)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in {"", "/"}
+    ):
+        raise ValueError("Ollama base URL must be a local loopback URL")
+    try:
+        parsed.port
+    except ValueError as error:
+        raise ValueError("Ollama base URL must be a local loopback URL") from error
+
+    hostname = parsed.hostname.lower()
+    if hostname != "localhost":
+        try:
+            if not ipaddress.ip_address(hostname).is_loopback:
+                raise ValueError
+        except ValueError as error:
+            raise ValueError("Ollama base URL must be a local loopback URL") from error
+    return normalized.rstrip("/")
 
 
 class _ChromaStore:
@@ -76,10 +118,16 @@ class _ChromaStore:
         return self._store.delete(ids=ids)
 
     def close(self) -> None:
-        # Chroma persists every mutation and exposes no stable public close API.
-        # Releasing this adapter reference allows its per-operation client to be
-        # collected without reaching into Chroma's private lifecycle methods.
-        self._store = None
+        if self._store is None:
+            return
+        store = self._store
+        try:
+            # LangChain does not expose the client, but Chroma's persistent
+            # client has a public close operation. Closing it is required before
+            # copying or deleting the SQLite-backed version directory.
+            store._client.close()
+        finally:
+            self._store = None
 
 
 class IndexManager:
@@ -91,6 +139,8 @@ class IndexManager:
         db_dir: Path = DB_DIR,
         active_index_file: Path = ACTIVE_INDEX_FILE,
         store_factory: StoreFactory | None = None,
+        snapshot_index: SnapshotIndex | None = None,
+        remove_index: RemoveIndex | None = None,
         collection_name: str = COLLECTION_NAME,
         embedding_model: str = EMBEDDING_MODEL,
         ollama_base_url: str = OLLAMA_BASE_URL,
@@ -100,8 +150,10 @@ class IndexManager:
         self.active_index_file = Path(active_index_file).resolve()
         self.collection_name = collection_name
         self.embedding_model = embedding_model
-        self.ollama_base_url = ollama_base_url
+        self.ollama_base_url = _validate_local_base_url(ollama_base_url)
         self._store_factory = store_factory or self._build_chroma_store
+        self._snapshot_index = snapshot_index or shutil.copytree
+        self._remove_index = remove_index or shutil.rmtree
         self._ensure_active_version()
 
     def _build_chroma_store(self, path: Path) -> VectorStore:
@@ -252,8 +304,19 @@ class IndexManager:
         materialized = self._validate_document_chunks(chunks)
         document_id = materialized[0].document_id
         chunk_ids = [chunk.chunk_id for chunk in materialized]
-        store = self._store_factory(self.active_db_path())
+        previous_path = self.active_db_path()
+        active_result = self._read_store(previous_path)
+        active_document_ids = self._document_ids(active_result)
+        active_count = len(self._ids(active_result))
+        existing_count = len(
+            self._ids_for_document(active_result, document_id=document_id)
+        )
+        candidate_path = self._new_version_path()
+        store: VectorStore | None = None
+        switched = False
         try:
+            self._snapshot_index(previous_path, candidate_path)
+            store = self._store_factory(candidate_path)
             existing = self._ids(
                 store.get(where={"document_id": document_id}, include=["metadatas"])
             )
@@ -263,30 +326,145 @@ class IndexManager:
                 [self._to_document(chunk) for chunk in materialized],
                 ids=chunk_ids,
             )
-        except Exception as error:
-            try:
-                store.delete(ids=chunk_ids)
-            except Exception:
-                pass
-            raise IndexBuildError(f"document upsert failed: {document_id}") from error
-        finally:
+            self._verify_store(
+                store,
+                active_document_ids | {document_id},
+                active_count - existing_count + len(materialized),
+            )
             store.close()
+            store = None
+            self._write_active_pointer(candidate_path)
+            switched = True
+        except Exception as error:
+            self._abort_candidate(
+                candidate_path,
+                store,
+                error,
+                operation_message=f"document upsert failed: {document_id}",
+            )
+
+        assert switched
+        self._retire(previous_path)
 
     def delete_document(self, document_id: str) -> None:
         """Delete all active chunks selected by document metadata."""
         if not isinstance(document_id, str) or not document_id.strip():
             raise ValueError("document_id must be non-empty")
-        store = self._store_factory(self.active_db_path())
+        previous_path = self.active_db_path()
+        active_result = self._read_store(previous_path)
+        active_document_ids = self._document_ids(active_result)
+        existing_count = len(
+            self._ids_for_document(active_result, document_id=document_id)
+        )
+        if existing_count == 0:
+            return
+        candidate_path = self._new_version_path()
+        store: VectorStore | None = None
+        switched = False
         try:
+            self._snapshot_index(previous_path, candidate_path)
+            store = self._store_factory(candidate_path)
             existing = self._ids(
                 store.get(where={"document_id": document_id}, include=["metadatas"])
             )
             if existing:
                 store.delete(ids=existing)
+            self._verify_store(
+                store,
+                active_document_ids - {document_id},
+                len(self._ids(active_result)) - existing_count,
+            )
+            store.close()
+            store = None
+            self._write_active_pointer(candidate_path)
+            switched = True
         except Exception as error:
-            raise IndexBuildError(f"document deletion failed: {document_id}") from error
+            self._abort_candidate(
+                candidate_path,
+                store,
+                error,
+                operation_message=f"document deletion failed: {document_id}",
+            )
+
+        assert switched
+        self._retire(previous_path)
+
+    def _read_store(self, path: Path) -> Mapping[str, Sequence[object]]:
+        store = self._store_factory(path)
+        try:
+            return store.get(include=["metadatas"])
         finally:
             store.close()
+
+    @classmethod
+    def _ids_for_document(
+        cls,
+        result: Mapping[str, Sequence[object]],
+        *,
+        document_id: str,
+    ) -> list[str]:
+        ids = cls._ids(result)
+        metadatas = result.get("metadatas", ())
+        return [
+            chunk_id
+            for chunk_id, metadata in zip(ids, metadatas, strict=True)
+            if isinstance(metadata, Mapping)
+            and metadata.get("document_id") == document_id
+        ]
+
+    @staticmethod
+    def _document_ids(result: Mapping[str, Sequence[object]]) -> set[str]:
+        metadatas = result.get("metadatas", ())
+        return {
+            str(metadata["document_id"])
+            for metadata in metadatas
+            if isinstance(metadata, Mapping) and "document_id" in metadata
+        }
+
+    def _retire(self, path: Path) -> None:
+        try:
+            self._remove_index(path)
+        except Exception as error:
+            raise IndexCleanupError(
+                "retired index cleanup failed after active pointer switch",
+                stale_path=path,
+            ) from error
+
+    def _abort_candidate(
+        self,
+        candidate_path: Path,
+        store: VectorStore | None,
+        operation_error: Exception,
+        *,
+        operation_message: str,
+    ) -> None:
+        close_error: Exception | None = None
+        remove_error: Exception | None = None
+        try:
+            if store is not None:
+                store.close()
+        except Exception as error:
+            close_error = error
+        finally:
+            try:
+                if candidate_path.exists():
+                    self._remove_index(candidate_path)
+            except Exception as error:
+                remove_error = error
+
+        if close_error is not None or remove_error is not None:
+            failures = []
+            if close_error is not None:
+                failures.append("store close")
+            if remove_error is not None:
+                failures.append("directory removal")
+            raise IndexCleanupError(
+                f"candidate cleanup failed ({' and '.join(failures)})",
+                stale_path=candidate_path if remove_error is not None else None,
+            ) from operation_error
+        if isinstance(operation_error, IndexBuildError):
+            raise operation_error
+        raise IndexBuildError(operation_message) from operation_error
 
     @staticmethod
     def _flatten_documents(documents: Iterable[Iterable[IndexChunk]]) -> list[IndexChunk]:
@@ -334,23 +512,17 @@ class IndexManager:
             store = None
             self._write_active_pointer(candidate_path)
             switched = True
-        except IndexVerificationError:
-            raise
         except Exception as error:
-            raise IndexBuildError("index rebuild failed") from error
-        finally:
-            if store is not None:
-                store.close()
-            if not switched:
-                shutil.rmtree(candidate_path, ignore_errors=True)
+            self._abort_candidate(
+                candidate_path,
+                store,
+                error,
+                operation_message="index rebuild failed",
+            )
 
+        assert switched
         if previous_path != candidate_path:
-            try:
-                shutil.rmtree(previous_path)
-            except OSError:
-                # A verified version is already active. A stale retired version
-                # is safe and can be cleaned up by a later maintenance pass.
-                pass
+            self._retire(previous_path)
         return candidate_path
 
     def _verify_store(
